@@ -1,0 +1,412 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: This will deploy a vpc with windows ec2 DC
+##Enter the Parameters
+Parameters: 
+ ClientAbbreviatedName: 
+    Type: String
+    Description: Enter the name of the client
+    Default: Netcov 
+ Computername: 
+    Type: String
+    Description: Computername - maximum 15 characters
+    MaxLength: '15'     
+ InstanceSize: 
+    Type: String
+    Description: Instance Size
+    Default: t2.small
+    AllowedValues:
+      - "t3a.medium" 
+      - "t3a.large"
+      - "t2.small"
+ DomainDNSName:
+    Description: >-
+      Fully qualified domain name (FQDN) of the forest root domain e.g.
+      corp.example.com
+    Type: String
+    MinLength: '3'
+    MaxLength: '25'
+    AllowedPattern: '[a-zA-Z0-9]+\..+'
+ DomainNetBIOSName:
+    Description: >-
+      NetBIOS name of the domain (upto 15 characters) for users of earlier
+      versions of Windows e.g. CORP
+    Type: String
+    MinLength: '1'
+    MaxLength: '15'
+    AllowedPattern: '[a-zA-Z0-9]+'
+ RestoreModePassword:
+    Description: >-
+      Password for a separate Administrator account when the domain controller
+      is in Restore Mode. Must be at least 8 characters containing letters,
+      numbers and symbols
+    Type: String
+    MinLength: '8'
+    MaxLength: '32'
+    AllowedPattern: >-
+      (?=^.{6,255}$)((?=.*\d)(?=.*[A-Z])(?=.*[a-z])|(?=.*\d)(?=.*[^A-Za-z0-9])(?=.*[a-z])|(?=.*[^A-Za-z0-9])(?=.*[A-Z])(?=.*[a-z])|(?=.*\d)(?=.*[A-Z])(?=.*[^A-Za-z0-9]))^.*
+    NoEcho: 'True'
+ AvailabilityZone:
+    Type: String
+    Description: Default AZ
+    AllowedValues: 
+      - us-east-1a
+      - us-east-1b  
+
+##Choose the Key Pair from the list
+ KeyPair:
+    Description: Name of an existing EC2 KeyPair
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.  
+
+##Enter the Public IP of the machine that will rdp into the instance    
+ SourceCidrForRDP:
+    Description: >-
+      IP Cidr from which you are likely to RDP into the instances. You can add
+      rules later by modifying the created security groups e.g. 54.32.98.160/32
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    AllowedPattern: '^([0-9]+\.){3}[0-9]+\/[0-9]+$'  
+    
+#Mappings
+Mappings:
+  AMIMap:
+    us-east-1:
+       "ImageId": "ami-0e38fa17744b2f6a5"
+    us-east-2:
+       "ImageId": "ami-0d71f4dc5aafad9fb"  
+##Create the Resources
+Resources:
+##Create the VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.50.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClientAbbreviatedName}-VPCA'
+        - Key: Application
+          Value: !Ref 'AWS::StackName'
+
+##Create the Internet Gateway
+  InternetGateway:
+      Type: AWS::EC2::InternetGateway
+      Properties:
+          Tags:
+           - Key: Name
+             Value: !Sub '${ClientAbbreviatedName}-GW01'
+           - Key: Application
+             Value: !Ref 'AWS::StackName'   
+
+##Attach the IGW to VPC
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+        InternetGatewayId: !Ref InternetGateway
+        VpcId: !Ref VPC
+##Create 2 Public Subnets  
+
+##Public Subnet 1
+  PublicSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+         VpcId: !Ref VPC
+         AvailabilityZone: us-east-1a 
+         CidrBlock: 10.50.1.0/24
+         MapPublicIpOnLaunch: true
+         Tags:
+           - Key: Name
+             Value: subnet-us-east-1a  
+           - Key: Application
+             Value: !Ref 'AWS::StackName'
+
+##Public Subnet 2     
+  PublicSubnet2:
+       Type: AWS::EC2::Subnet
+       Properties:
+          VpcId: !Ref VPC
+          AvailabilityZone: us-east-1b
+          CidrBlock: 10.50.2.0/24
+          MapPublicIpOnLaunch: true
+          Tags:
+            - Key: Name
+              Value: subnet-us-east-1b
+            - Key: Application
+              Value: !Ref 'AWS::StackName' 
+
+##Custom Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClientAbbreviatedName}-RT01'
+        - Key: Application
+          Value: !Ref 'AWS::StackName' 
+
+##Add Default Public Route
+  DefaultPublicRoute:
+     Type: AWS::EC2::Route
+     DependsOn: InternetGatewayAttachment
+     Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway    
+
+##Subnet Association to the Main Route 
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable    
+
+##Create The Security Group           
+  WinSecurityGroup:
+      Type: 'AWS::EC2::SecurityGroup'
+      Properties:
+         GroupDescription:  Sec Group with port 3389 
+         SecurityGroupIngress:
+           - IpProtocol: udp
+             FromPort: '123'
+             ToPort: '123'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: tcp
+             FromPort: '135'
+             ToPort: '135'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: tcp
+             FromPort: '80'
+             ToPort: '80'
+             CidrIp: 0.0.0.0/0 
+           - IpProtocol: udp
+             FromPort: '138'
+             ToPort: '138'
+             CidrIp: 0.0.0.0/0 
+           - IpProtocol: tcp
+             FromPort: '389'
+             ToPort: '389'
+             CidrIp: 0.0.0.0/0 
+           - IpProtocol: udp
+             FromPort: '389'
+             ToPort: '389'
+             CidrIp: 0.0.0.0/0 
+           - IpProtocol: tcp
+             FromPort: '636'
+             ToPort: '636'
+             CidrIp: 0.0.0.0/0 
+           - IpProtocol: tcp
+             FromPort: '3268'
+             ToPort: '3268'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: tcp
+             FromPort: '3269'
+             ToPort: '3269'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: tcp
+             FromPort: '53'
+             ToPort: '53'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: udp
+             FromPort: '53'
+             ToPort:  '53'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: tcp
+             FromPort: '88'
+             ToPort: '88'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: udp
+             FromPort: '88'
+             ToPort: '88'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: tcp
+             FromPort: '445'
+             ToPort: '445'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: udp
+             FromPort:  '445'
+             ToPort:  '445'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: udp
+             FromPort: '135'
+             ToPort:  '135'
+             CidrIp: 0.0.0.0/0
+           - IpProtocol: tcp
+             FromPort: '3389'
+             ToPort: '3389'
+             CidrIp: 0.0.0.0/0
+             
+           - IpProtocol: tcp
+             FromPort: '1024'
+             ToPort:  '65535'
+             CidrIp: 0.0.0.0/0               
+           - IpProtocol: tcp
+             FromPort: '3389' 
+             ToPort: '3389'
+             CidrIp:  !Ref SourceCidrForRDP
+         SecurityGroupEgress:
+           - IpProtocol: -1
+             CidrIp: 0.0.0.0/0 
+           - IpProtocol: tcp
+             FromPort: '80' 
+             ToPort: '80'
+             CidrIp: 0.0.0.0/0   
+           - IpProtocol: tcp
+             FromPort: '3389' 
+             ToPort: '3389'
+             CidrIp: 0.0.0.0/0   
+         Tags:
+           - Key: Name
+             Value: RDP-SecurityGroup                
+         VpcId: !Ref VPC  
+
+##Windows Instance
+  Instance:
+    Type: 'AWS::EC2::Instance' 
+    Metadata:
+       'AWS::CloudFormation::Init':
+         config:
+            files:
+              'c:\cfn\cfn-hup.conf':
+                content: !Join 
+                  - ''
+                  - - |
+                      [main]
+                    - stack=
+                    - !Ref 'AWS::StackId'
+                    - |+
+
+                    - region=
+                    - !Ref 'AWS::Region'
+                    - |+
+
+              'c:\cfn\hooks.d\cfn-auto-reloader.conf':  
+                content: !Join 
+                 - '' 
+                 - - |
+                     [cfn-auto-reloader-hook]
+                   - |
+                     triggers=post.update
+                   - >     
+                     path=Resources.Instance.Metadata.AWS::CloudFormation::Init
+                   - 'action=cfn-init.exe -v -s '
+                   - !Ref 'AWS::StackId'
+                   - ' -r DomainController'
+                   - ' --region '
+                   - !Ref 'AWS::Region'
+                   - |+
+
+              'C:\cfn\RunCommand.bat':
+                content: |-
+                 %~1
+                  IF %ERRORLEVEL% GTR 10 ( exit /b 1 ) else ( exit /b 0 ) 
+            commands:    
+              1-run-dcpromo:
+                  command: !Join
+                    - '' 
+                    - - >-
+                        C:\cfn\RunCommand.bat "dcpromo /unattend 
+                        /ReplicaOrNewDomain:Domain  /NewDomain:Forest 
+                        /NewDomainDNSName:
+                      - !Ref DomainDNSName
+                      - '  /ForestLevel:4 /DomainNetbiosName:'
+                      - !Ref DomainNetBIOSName  
+                      - ' /DomainLevel:4  /InstallDNS:Yes  /ConfirmGc:Yes  /CreateDNSDelegation:No  /DatabasePath:"C:\Windows\NTDS"  /LogPath:"C:\Windows\NTDS"  /SYSVOLPath:"C:\Windows\SYSVOL" /SafeModeAdminPassword='
+                      - !Ref RestoreModePassword
+                      - ' /RebootOnCompletion:Yes"'
+                  waitAfterCompletion: forever
+              2-signal-success:
+                  command: !Join 
+                    - ''
+                    - - cfn-signal.exe -e 0 "
+                      - !Base64
+                        Ref: DomainControllerWaitHandle
+                      - '"'
+            services:
+              windows:
+                cfn-hup:
+                  enabled: 'true'
+                  ensureRunning: 'true'
+                  files:
+                    - 'c:\cfn\cfn-hup.conf'
+                    - 'c:\cfn\hooks.d\cfn-auto-reloader.conf'
+
+    Properties:
+      AvailabilityZone: !Sub "${AvailabilityZone}"
+      SubnetId: !Ref PublicSubnet1
+      ImageId: !FindInMap [ AMIMap,!Ref "AWS::Region", ImageId ]
+      InstanceType: !Sub "${InstanceSize}"
+      KeyName: !Sub "${KeyPair}"
+      SecurityGroupIds: 
+         - !Ref WinSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${Computername}"    
+      UserData: !Base64
+        'Fn::Join':
+           - ''
+           - - |
+               <script>
+             - 'cfn-init.exe -v -s '
+             - !Ref 'AWS::StackId'
+             - ' -r Instance '
+             - ' --region '
+             - !Ref 'AWS::Region'
+             - |+
+
+             - </script>
+  DomainControllerWaitCondition:
+    Type: 'AWS::CloudFormation::WaitCondition'
+    Properties:
+      Count: 1
+      Handle: !Ref DomainControllerWaitHandle
+      Timeout: '900'    #900 secs is 15 mins 
+    DependsOn: Instance
+  DomainControllerWaitHandle:
+    Type: 'AWS::CloudFormation::WaitConditionHandle'        
+  
+#Outputs   
+Outputs:
+  DomainControllerDNSName:
+    Value: !GetAtt 
+      - Instance
+      - PublicDnsName
+    Description: Public DNS name of Active Directory server for RDP connection
+  DomainControllerIP:
+    Value: !GetAtt 
+      - Instance
+      - PrivateIp
+    Description: Private IP address of Active Directory server which is also a DNS server
+  DomainAdmin:
+    Value: !Join 
+      - ''
+      - - !Ref DomainNetBIOSName
+        - \Administrator
+    Description: Default domain administrator account
+  DomainAdminPassword:
+    Value: Please retrieve Administrator password of the instance
+
+  VPCID:
+    Description: the Id of the newly created VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VPC-Id"
+  PublicSubnet01:
+    Description: PublicSubnet1
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnet1"
+      
+  PublicSubnet02:
+    Description: PublicSubnet2
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnet2"   
